@@ -1,0 +1,485 @@
+---
+title: "Exploratory Data Analysis"
+author: "Christian Birchler"
+date: "5/21/2020"
+output: pdf_document
+---
+
+# Load data and packages
+
+```{r}
+
+library(data.table)
+library(ggplot2)
+library(grid)
+library(gridExtra)
+library(ggbiplot)
+
+set.seed(123)
+
+########## READ DATA ##########
+setwd("~/Desktop/bsc-analysis")
+dd.orig <- fread("vm6-no-gc-merged.csv")
+idflakies <- fread("idflakies-projects.csv")
+###############################
+```
+
+# Clean data
+A data set with roughly 400'000 entries by 74 variable has probably some invalid (or corrupted) data entries. First of all they must be identrified and treated separately.
+```{r}
+dd <- dd.orig
+
+# convert all collumns with numbers as numeric data type
+# collect indices of NA entries -> those are corrupted data entries
+dd$deadlock.count <- as.numeric( dd$deadlock.count) 
+na.indeces <- which( is.na( dd$deadlock.count))
+
+dd$loaded <- as.numeric( dd$loaded) 
+na.indeces <- unique( c(na.indeces, which( is.na(dd$loaded))))
+
+dd$pools.Metaspace.used <- as.numeric( dd$pools.Metaspace.used)
+na.indeces <- unique( c(na.indeces, which( is.na(dd$pools.Metaspace.used))))
+
+dd$`pools.PS-Eden-Space.committed` <- as.numeric(dd$`pools.PS-Eden-Space.committed`)
+na.indeces <- unique( c(na.indeces, which( is.na(dd$`pools.PS-Eden-Space.committed`))))
+
+dd$`pools.PS-Eden-Space.init` <- as.numeric(dd$`pools.PS-Eden-Space.init`)
+na.indeces <- unique( c(na.indeces, which( is.na(dd$`pools.PS-Eden-Space.init`))))
+
+dd$`pools.PS-Eden-Space.max` <- as.numeric(dd$`pools.PS-Eden-Space.max`)
+na.indeces <- unique( c(na.indeces, which( is.na(dd$`pools.PS-Eden-Space.max`))))
+
+dd$`pools.PS-Eden-Space.used` <- as.numeric(dd$`pools.PS-Eden-Space.used`)
+na.indeces <- unique( c(na.indeces, which( is.na(dd$`pools.PS-Eden-Space.used`))))
+
+dd$`pools.PS-Survivor-Space.committed` <- as.numeric(dd$`pools.PS-Survivor-Space.committed`)
+na.indeces <- unique( c(na.indeces, which( is.na(dd$`pools.PS-Survivor-Space.committed`))))
+
+dd$terminated.count <- as.numeric(dd$terminated.count)
+na.indeces <- unique( c(na.indeces, which( is.na(dd$terminated.count))))
+
+# proportion of corrupted data entries -> ~1%
+print(length( na.indeces)/nrow(dd))
+
+
+# omit corrupted data entries
+dd <- dd[-na.indeces,]
+
+
+```
+
+
+
+# Flakiness
+
+```{r}
+unique_tests <- unique(dd[, c('TestCase','ProjectName','CommitHash')])
+
+# count the different outcomes per test case (group by TestCase,ProjectName and CommitHash)
+nr_different_outcomes <- dd[  , list(`pass/fail` = `pass/fail`, Count = uniqueN(`pass/fail`))
+                              , by=c('TestCase','ProjectName','CommitHash') ]
+different_outcomes <- nr_different_outcomes[ Count > 1 ,  ]
+
+# less than 20 entries -> build failure -> flaky?
+nr_measurements_per_test <- dd[  , list(Count = .N)
+                                 , by=c('TestCase','ProjectName','CommitHash') ]
+
+# there are only even number of test measurements of a single test case
+# --> there can only build failures if there are less than 20 measurements
+less_than_20_entries <- nr_measurements_per_test[ Count < 20 ,  ] # flaky?
+
+# merge (union) different outcomes with tests which have not 20 measurements
+different_outcomes_or_less_20_entries <- merge(different_outcomes, less_than_20_entries
+                                               , by=c('TestCase','ProjectName','CommitHash')
+                                               , all=TRUE)
+
+#flaky.own <- different_outcomes_or_less_20_entries
+flaky.own <- unique( different_outcomes[, c('TestCase','ProjectName','CommitHash')] )
+
+# percentage of flaky tests in own measurements
+flakiness_rate <- nrow(flaky.own)/nrow(unique_tests)
+
+flakiness_rate
+```
+
+Here is to consider the definition of flakiness (`flaky.own`). In the current setting I consider a test as flaky if there are different outcomes (pass/failure/error) of the test. I do not consider the case where the test code compilation failed for some but not all iterations.
+
+From all the measurements were 1.3% of the tests flaky according to the definition above.
+
+
+# Comparison with idFlakies data set
+
+```{r}
+
+# set merge with idflakies data set (intersection over 'TestCase','CommitHash')
+flaky.intersect <- merge(flaky.own, idflakies, by.x=c('TestCase','CommitHash')
+                         , by.y=c('Test Name','SHA'), all=FALSE)
+
+nrow(flaky.intersect)
+```
+
+`flaky.intersect` has only two entries. This means that the recorded flaky tests of the idFlakies data set could not be well replicated. Only two of their flaky tests could be replicated. Nevertheless, from the own measurements multiple additional flaky tests could be identified.
+
+
+# Summary of all software projects
+Below is a list of all projects where measurements were taken and the number of flaky and non-flaky tests are also listed.
+
+```{r}
+# label data set (flaky/not flaky)
+flaky.own$isFlaky <- TRUE
+dd.labeled <- merge(dd, flaky.own, by=c('TestCase','ProjectName','CommitHash')
+                    , all=TRUE)
+dd.labeled[ is.na(isFlaky) , "isFlaky"] <- FALSE
+
+# unique tests cases (original data set has before/after entries)
+labeled_tests <- unique( dd.labeled[, c('TestCase','ProjectName','CommitHash','isFlaky')] )
+
+
+
+flaky_tests_per_project <- labeled_tests[ isFlaky == TRUE , list(NrFlaky = .N)
+                                          , by=c('ProjectName','CommitHash') ]
+non_flaky_tests_per_project <- labeled_tests[ isFlaky == FALSE , list(NrNotFlaky = .N)
+                                              , by=c('ProjectName','CommitHash') ]
+
+projects_overview <- merge(flaky_tests_per_project, non_flaky_tests_per_project,
+                           by=c('ProjectName','CommitHash'), all=TRUE)
+
+projects_overview[,-'CommitHash']
+
+```
+
+# Projects of interest
+According to the table above it might be more interesting to focus only on projects with a fair amount of flaky tests to gain a better understanding. It does not make really sense to investigate measurements with no flaky tests or only a few. Below you see the depicted projects of interest.
+
+```{r}
+projects_overview[c(4,25,34,39,55), -'CommitHash']
+```
+
+
+# PCA dimensionality reduction
+Since the data set is multivariate it makes sence to do a PCA to see if we can position flaky tests in a region where the data has a high variance. For this purpose I treat each project (listed above) separately.
+
+## Struts
+```{r}
+struts <- dd.labeled[ProjectName == 'Struts',]
+# struts$deadlock.count <-as.numeric(struts$deadlock.count)
+# struts$loaded <- as.numeric(struts$loaded)
+# struts$pools.Metaspace.used <- as.numeric(struts$pools.Metaspace.used)
+# struts$`pools.PS-Eden-Space.committed` <- as.numeric(struts$`pools.PS-Eden-Space.committed`)
+# struts$`pools.PS-Eden-Space.init` <- as.numeric(struts$`pools.PS-Eden-Space.init`)
+# struts$`pools.PS-Eden-Space.max` <- as.numeric(struts$`pools.PS-Eden-Space.max`)
+# struts$`pools.PS-Eden-Space.used` <- as.numeric(struts$`pools.PS-Eden-Space.used`)
+# struts$`pools.PS-Survivor-Space.committed` <- as.numeric(struts$`pools.PS-Survivor-Space.committed`)
+# struts$terminated.count <- as.numeric(struts$terminated.count)
+
+# waiting count data might be corrupted
+#struts$waiting.count <- as.numeric(struts$waiting.count)
+
+
+#struts[,-c('V1','pass/fail','iteration','TestCase','CommitHash','before/after','ProjectName','deadlocks','name','vendor','waiting.count','isFlaky')]
+
+ignore <- c('V1','pass/fail','iteration','TestCase','CommitHash','before/after','ProjectName','deadlocks','name','vendor','waiting.count','pools.PS-Survivor-Space.init','pools.PS-Survivor-Space.max','heap.init','heap.max','non-heap.init','non-heap.max','pools.Compressed-Class-Space.max','pools.Code-Cache.init','pools.Code-Cache.max','pools.Metaspace.init','pools.PS-Eden-Space.init','pools.PS-Old-Gen.init','pools.PS-Old-Gen.max','total.max','total.used','pools.PS-Eden-Space.usage','pools.PS-Survivor-Space.committed','isFlaky')
+select_columns <- c()
+
+# for-loop cannot handle data.table :-(
+struts <- as.data.frame(struts)
+# PCA cannot be performed if there are vectors if uniform entries
+for (i in colnames(struts)){
+  x <- struts[3,i]
+  if(all(struts[,i] == x) || i %in% ignore){
+    next
+  }
+  select_columns <- c(select_columns, i)
+}
+
+#struts <- as.data.table(struts)
+#struts[,select_columns]
+
+# perform PCA with scaling and center (avoid missleading eigenvectors)
+struts.pca <- prcomp(struts[,select_columns], center=TRUE, scale.=TRUE )
+
+groups <- as.factor(struts$isFlaky)
+levels(groups) <- c("non-flaky","flaky")
+ggbiplot(struts.pca, groups=groups, ellipse=TRUE, obs.scale=TRUE, var.scale=TRUE)
+
+
+```
+This image shows that the identified flaky tests of 'Struts' can be located separately (more or less) within this biplot.
+
+## Wildfly
+
+```{r}
+
+wildfly <- dd.labeled[ProjectName == 'wildfly',]
+# wildfly$deadlock.count <-as.numeric(wildfly$deadlock.count)
+# wildfly$loaded <- as.numeric(wildfly$loaded)
+# wildfly$pools.Metaspace.used <- as.numeric(wildfly$pools.Metaspace.used)
+# wildfly$`pools.PS-Eden-Space.committed` <- as.numeric(wildfly$`pools.PS-Eden-Space.committed`)
+# wildfly$`pools.PS-Eden-Space.init` <- as.numeric(wildfly$`pools.PS-Eden-Space.init`)
+# wildfly$`pools.PS-Eden-Space.max` <- as.numeric(wildfly$`pools.PS-Eden-Space.max`)
+# wildfly$`pools.PS-Eden-Space.used` <- as.numeric(wildfly$`pools.PS-Eden-Space.used`)
+# wildfly$`pools.PS-Survivor-Space.committed` <- as.numeric(wildfly$`pools.PS-Survivor-Space.committed`)
+# wildfly$terminated.count <- as.numeric(wildfly$terminated.count)
+
+# waiting count data might be corrupted
+#struts$waiting.count <- as.numeric(struts$waiting.count)
+
+
+#struts[,-c('V1','pass/fail','iteration','TestCase','CommitHash','before/after','ProjectName','deadlocks','name','vendor','waiting.count','isFlaky')]
+
+#ignore <- c('V1','pass/fail','iteration','TestCase','CommitHash','before/after','ProjectName','deadlocks','name','vendor','waiting.count','pools.PS-Survivor-Space.init','pools.PS-Survivor-Space.max','heap.init','heap.max','non-heap.init','non-heap.max','pools.Compressed-Class-Space.max','pools.Code-Cache.init','pools.Code-Cache.max','pools.Metaspace.init','pools.PS-Eden-Space.init','pools.PS-Old-Gen.init','pools.PS-Old-Gen.max','total.max','total.used','pools.PS-Eden-Space.usage','pools.PS-Survivor-Space.committed','isFlaky')
+select_columns <- c()
+
+# for-loop cannot handle data.table :-(
+wildfly <- as.data.frame(wildfly)
+# PCA cannot be performed if there are vectors if uniform entries
+for (i in colnames(wildfly)){
+  x <- wildfly[3,i]
+  if(all(wildfly[,i] == x) || i %in% ignore){
+    next
+  }
+  select_columns <- c(select_columns, i)
+}
+
+#struts <- as.data.table(struts)
+#struts[,select_columns]
+
+# perform PCA with scaling and center (avoid missleading eigenvectors)
+wildfly.pca <- prcomp(wildfly[,select_columns], center=TRUE, scale.=TRUE )
+
+groups <- as.factor(wildfly$isFlaky)
+levels(groups) <- c("non-flaky","flaky")
+ggbiplot(wildfly.pca, groups=groups, ellipse=TRUE, obs.scale=TRUE, var.scale=TRUE)
+
+```
+
+
+
+## Oryx
+```{r}
+oryx <- dd.labeled[ProjectName == 'oryx',]
+# oryx$deadlock.count <-as.numeric(oryx$deadlock.count)
+# oryx$loaded <- as.numeric(oryx$loaded)
+# oryx$pools.Metaspace.used <- as.numeric(oryx$pools.Metaspace.used)
+# oryx$`pools.PS-Eden-Space.committed` <- as.numeric(oryx$`pools.PS-Eden-Space.committed`)
+# oryx$`pools.PS-Eden-Space.init` <- as.numeric(oryx$`pools.PS-Eden-Space.init`)
+# oryx$`pools.PS-Eden-Space.max` <- as.numeric(oryx$`pools.PS-Eden-Space.max`)
+# oryx$`pools.PS-Eden-Space.used` <- as.numeric(oryx$`pools.PS-Eden-Space.used`)
+# oryx$`pools.PS-Survivor-Space.committed` <- as.numeric(oryx$`pools.PS-Survivor-Space.committed`)
+# oryx$terminated.count <- as.numeric(oryx$terminated.count)
+
+# waiting count data might be corrupted
+#struts$waiting.count <- as.numeric(struts$waiting.count)
+
+
+#struts[,-c('V1','pass/fail','iteration','TestCase','CommitHash','before/after','ProjectName','deadlocks','name','vendor','waiting.count','isFlaky')]
+
+#ignore <- c('V1','pass/fail','iteration','TestCase','CommitHash','before/after','ProjectName','deadlocks','name','vendor','waiting.count','pools.PS-Survivor-Space.init','pools.PS-Survivor-Space.max','heap.init','heap.max','non-heap.init','non-heap.max','pools.Compressed-Class-Space.max','pools.Code-Cache.init','pools.Code-Cache.max','pools.Metaspace.init','pools.PS-Eden-Space.init','pools.PS-Old-Gen.init','pools.PS-Old-Gen.max','total.max','total.used','pools.PS-Eden-Space.usage','pools.PS-Survivor-Space.committed','isFlaky')
+select_columns <- c()
+
+# for-loop cannot handle data.table :-(
+oryx <- as.data.frame(oryx)
+# PCA cannot be performed if there are vectors if uniform entries
+for (i in colnames(oryx)){
+  x <- oryx[3,i]
+  if(all(oryx[,i] == x) || i %in% ignore){
+    next
+  }
+  select_columns <- c(select_columns, i)
+}
+
+#struts <- as.data.table(struts)
+#struts[,select_columns]
+
+# perform PCA with scaling and center (avoid missleading eigenvectors)
+oryx.pca <- prcomp(oryx[,select_columns], center=TRUE, scale.=TRUE )
+
+groups <- as.factor(oryx$isFlaky)
+levels(groups) <- c("non-flaky","flaky")
+ggbiplot(oryx.pca, groups=groups, ellipse=TRUE, obs.scale=TRUE, var.scale=TRUE, circle=TRUE)
+
+```
+
+
+## jhipster-registry	
+```{r}
+jhipsterregistry <- dd.labeled[ProjectName == 'jhipster-registry',]
+# jhipsterregistry$deadlock.count <-as.numeric(jhipsterregistry$deadlock.count)
+# jhipsterregistry$loaded <- as.numeric(jhipsterregistry$loaded)
+# jhipsterregistry$pools.Metaspace.used <- as.numeric(jhipsterregistry$pools.Metaspace.used)
+# jhipsterregistry$`pools.PS-Eden-Space.committed` <- as.numeric(jhipsterregistry$`pools.PS-Eden-Space.committed`)
+# jhipsterregistry$`pools.PS-Eden-Space.init` <- as.numeric(jhipsterregistry$`pools.PS-Eden-Space.init`)
+# jhipsterregistry$`pools.PS-Eden-Space.max` <- as.numeric(jhipsterregistry$`pools.PS-Eden-Space.max`)
+# jhipsterregistry$`pools.PS-Eden-Space.used` <- as.numeric(jhipsterregistry$`pools.PS-Eden-Space.used`)
+# jhipsterregistry$`pools.PS-Survivor-Space.committed` <- as.numeric(jhipsterregistry$`pools.PS-Survivor-Space.committed`)
+# jhipsterregistry$terminated.count <- as.numeric(jhipsterregistry$terminated.count)
+
+# waiting count data might be corrupted
+#struts$waiting.count <- as.numeric(struts$waiting.count)
+
+
+#struts[,-c('V1','pass/fail','iteration','TestCase','CommitHash','before/after','ProjectName','deadlocks','name','vendor','waiting.count','isFlaky')]
+
+#ignore <- c('V1','pass/fail','iteration','TestCase','CommitHash','before/after','ProjectName','deadlocks','name','vendor','waiting.count','pools.PS-Survivor-Space.init','pools.PS-Survivor-Space.max','heap.init','heap.max','non-heap.init','non-heap.max','pools.Compressed-Class-Space.max','pools.Code-Cache.init','pools.Code-Cache.max','pools.Metaspace.init','pools.PS-Eden-Space.init','pools.PS-Old-Gen.init','pools.PS-Old-Gen.max','total.max','total.used','pools.PS-Eden-Space.usage','pools.PS-Survivor-Space.committed','isFlaky')
+select_columns <- c()
+
+# for-loop cannot handle data.table :-(
+jhipsterregistry <- as.data.frame(jhipsterregistry)
+# PCA cannot be performed if there are vectors if uniform entries
+for (i in colnames(jhipsterregistry)){
+  x <- jhipsterregistry[3,i]
+  if(all(jhipsterregistry[,i] == x) || i %in% ignore){
+    next
+  }
+  select_columns <- c(select_columns, i)
+}
+
+#struts <- as.data.table(struts)
+#struts[,select_columns]
+
+# perform PCA with scaling and center (avoid missleading eigenvectors)
+jhipsterregistry.pca <- prcomp(jhipsterregistry[,select_columns], center=TRUE, scale.=TRUE )
+
+groups <- as.factor(jhipsterregistry$isFlaky)
+levels(groups) <- c("non-flaky","flaky")
+ggbiplot(jhipsterregistry.pca, groups=groups, ellipse=TRUE, obs.scale=TRUE, var.scale=TRUE, circle=TRUE)
+```
+
+This biplot does not show a clear separat cluster of flkay tests. The flaky tests are evenly distribute among non flaky tests on the right side. It might be that for this project too few data are available in comparison to the previous three projects and their PCA biplot.
+
+
+
+# PCA of all all measurements together
+Now we take a look how the biplots look like if we do not separate the projects. For this purpose it makes sence also to scale (as usual) the data for the PCA.
+
+```{r}
+# convert all collumns with numbers as numeric data type
+# collect indices of NA entries -> those are corrupted data entries
+all_together <- dd.labeled
+
+select_columns <- c()
+
+# for-loop cannot handle data.table :-(
+all_together <- as.data.frame(all_together)
+# PCA cannot be performed if there are vectors if uniform entries
+for (i in colnames(all_together)){
+  x <- all_together[3,i]
+  if(all(all_together[,i] == x) || i %in% ignore){
+    next
+  }
+  select_columns <- c(select_columns, i)
+}
+
+# perform PCA with scaling and center (avoid missleading eigenvectors)
+all_together.pca <- prcomp(all_together[,select_columns], center=TRUE, scale.=TRUE )
+
+groups <- as.factor(all_together$isFlaky)
+levels(groups) <- c("non-flaky","flaky")
+ggbiplot(all_together.pca, groups=groups, ellipse=TRUE, obs.scale=TRUE, var.scale=TRUE, alpha=0.1)
+```
+
+This plot with all data points is pretty useless since there are too many data points which overlap heavily! A way to tackle is to downsample the data set. Try to balance the data. Note that only 1.4% of the data are flaky.
+```{r}
+nr_non_flaky <- 120
+nr_flaky <- 40
+
+non_flaky_sample <- dd.labeled[sample( which( !dd.labeled$isFlaky), nr_non_flaky), ]
+flaky_sample <- dd.labeled[sample( which( dd.labeled$isFlaky), nr_flaky), ]
+
+all_together.downsample <- rbind(non_flaky_sample, flaky_sample)
+
+
+select_columns <- c()
+
+# for-loop cannot handle data.table :-(
+all_together.downsample <- as.data.frame(all_together.downsample)
+# PCA cannot be performed if there are vectors if uniform entries
+for (i in colnames(all_together.downsample)){
+  x <- all_together.downsample[3,i]
+  if(all(all_together.downsample[,i] == x) || i %in% ignore){
+    next
+  }
+  select_columns <- c(select_columns, i)
+}
+
+# perform PCA with scaling and center (avoid missleading eigenvectors)
+all_together.downsample.pca <- prcomp(all_together.downsample[,select_columns], center=TRUE, scale.=TRUE )
+
+groups <- as.factor(all_together.downsample$isFlaky)
+levels(groups) <- c("non-flaky","flaky")
+ggbiplot(all_together.downsample.pca, groups=groups, ellipse=TRUE, obs.scale=TRUE, var.scale=TRUE)
+
+```
+
+A unique cluster of flaky tests cannot be identified if we consider all test of all projects together. I think one of the main insights of all the biplots so far is that flaky tests of a project build a cluster (in biplots) but only within a certain project. In the case where arbitrarily tests of different projects were chosen it is very unlikely to cluster them.
+
+
+# Reported flaky tests of the idFlaky data set
+```{r}
+dd.idflakies <- merge( dd, idflakies, by.x=c('TestCase','CommitHash'), by.y=c('Test Name','SHA'), all=FALSE)[, 1:73] # keep only columns of dd
+
+nr_measure_idflakies_entries <- nrow( unique( dd.idflakies[, c('TestCase','CommitHash')]))
+# proportion of measured idlfakies entries
+nr_measure_idflakies_entries/nrow(idflakies)
+
+
+# label idflakies data set with isFlaky
+dd.idflakies$isFlaky <- TRUE
+
+# merege dd.idflakies with all non flaky tests
+dd.labeled <- as.data.frame( dd.labeled)
+dd.idflakies <- as.data.frame( dd.idflakies)
+tmp <-  merge( dd.labeled[ which( dd.labeled$isFlaky == FALSE),], dd.idflakies[, c('TestCase','CommitHash','isFlaky')], 
+               by=c('TestCase','CommitHash'), all=TRUE, allow.cartesian=FALSE)
+
+tmp <- unique( as.data.table(tmp))
+
+tmp[isFlaky.y == TRUE, 'isFlaky.x'] <- TRUE
+tmp$isFlaky.y <- NULL
+tmp <- tmp[,1:74]
+colnames(tmp)[length(colnames(tmp))] <- 'isFlaky'
+
+# data set of interest
+idflakies_only <- na.omit(tmp)
+rm(tmp)
+
+
+select_columns <- c()
+
+# for-loop cannot handle data.table :-(
+idflakies_only <- as.data.frame(idflakies_only)
+# PCA cannot be performed if there are vectors if uniform entries
+for (i in colnames(idflakies_only)){
+  x <- idflakies_only[3,i]
+  if(all(idflakies_only[,i] == x) || i %in% ignore){
+    next
+  }
+  select_columns <- c(select_columns, i)
+}
+
+# perform PCA with scaling and center (avoid missleading eigenvectors)
+idflakies_only.pca <- prcomp(idflakies_only[,select_columns], center=TRUE, scale.=TRUE )
+
+groups <- as.factor(idflakies_only$isFlaky)
+levels(groups) <- c("non-flaky","flaky")
+ggbiplot(idflakies_only.pca, groups=groups, ellipse=TRUE, obs.scale=TRUE, var.scale=TRUE, alpha=0.1)
+
+```
+
+Also in this case we can not clearly identrify a structure of flaky tests. It is similar like above where all measurements were considered. Let's differentiate again within certain projects.
+
+# Within projects with idFlakies flaky tests only
+Below you see a list of the available measurements (not tests) 
+```{r}
+
+idflakies_only <- as.data.table( idflakies_only)
+tests_only <- unique( idflakies_only[, c('ProjectName','CommitHash','isFlaky')])
+idflakies_only[, list(flakyMeasurements=sum(isFlaky), notflakyMeasurements=sum(!isFlaky)),
+               by=c('ProjectName','CommitHash')][,c('ProjectName','flakyMeasurements','notflakyMeasurements')]
+
+
+```
+
+
+
+
